@@ -31,9 +31,16 @@
             <artifactId>mongodb-driver-sync</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.14</version>
+        </dependency>
+
+        <dependency>
             <groupId>com.google.firebase</groupId>
             <artifactId>firebase-admin</artifactId>
             <version>9.11.0</version>
         </dependency>
+
     </dependencies>
 </project>
