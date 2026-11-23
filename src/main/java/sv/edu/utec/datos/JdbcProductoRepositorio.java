@@ -19,8 +19,8 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
             "codigo, nombre, categoria, precio, existencia";
 
     // ------------------------------------------------------------------
-// C: Create
-// ------------------------------------------------------------------
+    // C: Create
+    // ------------------------------------------------------------------
     @Override
     public void insertar(Producto p) {
         String sql = "INSERT INTO producto (" + COLUMNAS + ") VALUES (?, ?, ?, ?, ?)";
@@ -32,9 +32,153 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
             throw traducir(e, p.getCodigo());
         }
     }
+
+    /** Carga en lote como transacción: todo o nada. */
+    @Override
+    public int insertarVarios(List<Producto> productos) {
+        if (productos == null || productos.isEmpty()) {
+            return 0;
+        }
+        String sql = "INSERT INTO producto (" + COLUMNAS + ") VALUES (?, ?, ?, ?, ?)";
+        Connection cn = null;
+        try {
+            cn = ConexionPostgres.obtener();
+            cn.setAutoCommit(false);
+            try (PreparedStatement ps = cn.prepareStatement(sql)) {
+                for (Producto p : productos) {
+                    asignarParametros(ps, p);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            cn.commit();
+            return productos.size();
+        } catch (SQLException e) {
+            if (cn != null) {
+                try {
+                    cn.rollback();
+                } catch (SQLException ex) {
+                    e.addSuppressed(ex);
+                }
+            }
+            throw traducir(e, "lote");
+        } finally {
+            if (cn != null) {
+                try {
+                    cn.setAutoCommit(true);
+                    cn.close();
+                } catch (SQLException ignored) {
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
-// D: Delete
-// ------------------------------------------------------------------
+    // R: Read
+    // ------------------------------------------------------------------
+    @Override
+    public Optional<Producto> buscarPorCodigo(String codigo) {
+        List<Producto> r = consultar(
+                "SELECT " + COLUMNAS + " FROM producto WHERE codigo = ?", codigo);
+        return r.stream().findFirst();
+    }
+
+    @Override
+    public List<Producto> listarTodos() {
+        return consultar("SELECT " + COLUMNAS + " FROM producto ORDER BY codigo");
+    }
+
+    @Override
+    public List<Producto> listarPorCategoria(String categoria) {
+        return consultar(
+                "SELECT " + COLUMNAS + " FROM producto " +
+                        "WHERE categoria = ? ORDER BY codigo",
+                categoria);
+    }
+
+    @Override
+    public List<Producto> buscarPorNombre(String texto) {
+        String escapado = texto
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
+        return consultar(
+                "SELECT " + COLUMNAS + " FROM producto " +
+                        "WHERE nombre ILIKE ? ESCAPE '\\' ORDER BY codigo",
+                "%" + escapado + "%");
+    }
+
+    @Override
+    public List<Producto> buscarPorRangoDePrecio(double minimo, double maximo) {
+        return consultar(
+                "SELECT " + COLUMNAS + " FROM producto " +
+                        "WHERE precio BETWEEN ? AND ? ORDER BY precio, codigo",
+                minimo, maximo);
+    }
+
+    @Override
+    public List<ResumenCategoria> resumenPorCategoria() {
+        List<ResumenCategoria> resultado = new ArrayList<>();
+        String sql = "SELECT categoria, COUNT(*) AS productos, " +
+                "SUM(existencia) AS unidades, " +
+                "SUM(precio * existencia) AS valor " +
+                "FROM producto GROUP BY categoria ORDER BY categoria";
+        try (Connection cn = ConexionPostgres.obtener();
+             PreparedStatement ps = cn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                resultado.add(new ResumenCategoria(
+                        rs.getString("categoria"),
+                        rs.getInt("productos"),
+                        rs.getInt("unidades"),
+                        rs.getDouble("valor")));
+            }
+        } catch (SQLException e) {
+            throw new RepositorioException("Error al generar el resumen", e);
+        }
+        return resultado;
+    }
+
+    // ------------------------------------------------------------------
+    // U: Update
+    // ------------------------------------------------------------------
+    @Override
+    public boolean actualizar(Producto p) {
+        String sql = "UPDATE producto SET nombre = ?, categoria = ?, " +
+                "precio = ?, existencia = ?, actualizado_en = now() " +
+                "WHERE codigo = ?";
+        try (Connection cn = ConexionPostgres.obtener();
+             PreparedStatement ps = cn.prepareStatement(sql)) {
+            ps.setString(1, p.getNombre());
+            ps.setString(2, p.getCategoria());
+            ps.setDouble(3, p.getPrecio());
+            ps.setInt(4, p.getExistencia());
+            ps.setString(5, p.getCodigo());
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw traducir(e, p.getCodigo());
+        }
+    }
+
+    @Override
+    public boolean ajustarExistencia(String codigo, int cantidad) {
+        String sql = "UPDATE producto " +
+                "SET existencia = existencia + ?, actualizado_en = now() " +
+                "WHERE codigo = ? AND existencia + ? >= 0";
+        try (Connection cn = ConexionPostgres.obtener();
+             PreparedStatement ps = cn.prepareStatement(sql)) {
+            ps.setInt(1, cantidad);
+            ps.setString(2, codigo);
+            ps.setInt(3, cantidad);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw traducir(e, codigo);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // D: Delete
+    // ------------------------------------------------------------------
     @Override
     public boolean eliminar(String codigo) {
         try (Connection cn = ConexionPostgres.obtener();
@@ -47,15 +191,16 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
         }
     }
 
-
-    /** Ejecuta un SELECT con parametros y convierte cada fila en Producto. */
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
     private List<Producto> consultar(String sql, Object... parametros) {
         List<Producto> resultado = new ArrayList<>();
         try (Connection cn = ConexionPostgres.obtener();
              PreparedStatement ps = cn.prepareStatement(sql)) {
 
             for (int i = 0; i < parametros.length; i++) {
-                ps.setObject(i + 1, parametros[i]); // los indices empiezan en 1
+                ps.setObject(i + 1, parametros[i]);
             }
 
             try (ResultSet rs = ps.executeQuery()) {
@@ -63,7 +208,6 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
                     resultado.add(aProducto(rs));
                 }
             }
-
             return resultado;
 
         } catch (SQLException e) {
@@ -88,7 +232,6 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
                 rs.getInt("existencia"));
     }
 
-    /** Traduce el SQLState de PostgreSQL al idioma del negocio. */
     private RepositorioException traducir(SQLException e, String codigo) {
         String estado = e.getSQLState();
         if (DUPLICADO.equals(estado)) {
@@ -97,7 +240,7 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
         }
         if (REGLA_VIOLADA.equals(estado)) {
             return new RepositorioException(
-                    "PostgreSQL rechazo un valor fuera de regla en " + codigo, e);
+                    "PostgreSQL rechazó un valor fuera de regla en " + codigo, e);
         }
         return new RepositorioException(
                 "Error de base de datos [" + estado + "]: " + e.getMessage(), e);
